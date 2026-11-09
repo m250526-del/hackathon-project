@@ -19,7 +19,7 @@ const RESET_RE = /^(menu|cancel|start|shuru|0)$/i;
 const BACK_RE = /^(back|wapas|peeche|pichay)$/i;
 const YES_RE = /^(1|y|yes|ha+n?|haan|han|ji|ji haan|theek|sahi|ok|okay|ہاں|جی)$/i;
 const NO_RE = /^(2|n|no|nahi|nahin|nhi|نہیں)$/i;
-const QUESTION_RE = /[?؟]|kahan|kahaan|kidhar|where|kya hota|kya hai|kya likh|kaise|how|samajh nahi|what|\bkon\b|کہاں|کیا|کیسے/i;
+const QUESTION_RE = /[?؟]|\b(?:kahan|kahaan|kidhar|where|kya hota|kya hai|kya likh|kaise|how|samajh nahi|what|kon)\b|کہاں|کیا|کیسے/i;
 
 const queues = new Map();
 
