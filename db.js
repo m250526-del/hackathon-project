@@ -14,6 +14,7 @@ async function initSchema(pool) {
     )
   `);
   await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS voice_reply BOOLEAN NOT NULL DEFAULT false');
+  await pool.query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS chat_history JSONB NOT NULL DEFAULT '[]'::jsonb");
   await pool.query(`
     CREATE TABLE IF NOT EXISTS applications (
       id          SERIAL PRIMARY KEY,
@@ -33,7 +34,7 @@ async function resetSession(pool, phone) {
     `INSERT INTO sessions (phone) VALUES ($1)
      ON CONFLICT (phone) DO UPDATE SET
        agent = 'router', form_type = NULL, state = 'idle',
-       field_index = 0, retry_count = 0, answers = '{}'::jsonb, updated_at = now()
+       field_index = 0, retry_count = 0, answers = '{}'::jsonb, chat_history = '[]'::jsonb, updated_at = now()
      RETURNING *`,
     [phone]
   );
@@ -50,13 +51,13 @@ async function getSession(pool, phone) {
 }
 
 async function saveSession(pool, phone, patch) {
-  const allowed = ['agent', 'form_type', 'state', 'field_index', 'retry_count', 'answers', 'voice_reply'];
+  const allowed = ['agent', 'form_type', 'state', 'field_index', 'retry_count', 'answers', 'voice_reply', 'chat_history'];
   const keys = Object.keys(patch).filter((k) => allowed.includes(k));
   const sets = [];
   const vals = [];
   keys.forEach((k, i) => {
     sets.push(`${k} = $${i + 2}`);
-    if (k === 'answers') vals.push(JSON.stringify(patch[k]));
+    if (k === 'answers' || k === 'chat_history') vals.push(JSON.stringify(patch[k]));
     else vals.push(patch[k]);
   });
   sets.push('updated_at = now()');

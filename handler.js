@@ -59,10 +59,10 @@ async function processMessage({ sock, pgPool, fromJid, senderPhone, textContent,
   console.log('[INCOMING]', { phoneLast4: senderPhone.slice(-4), textLength: textContent.length, isImage, isAudio });
 
   const session = await getSession(pgPool, senderPhone);
-  let voiceOut = isAudio || session.voice_reply;
+  const out = { voice: Boolean(isAudio || session.voice_reply) };
 
   const send = async (text) => {
-    if (voiceOut) {
+    if (out.voice) {
       try {
         const audio = await ai.speak(text.slice(0, 700));
         await sock.sendMessage(fromJid, { audio, mimetype: 'audio/ogg; codecs=opus', ptt: true });
@@ -114,7 +114,7 @@ async function processMessage({ sock, pgPool, fromJid, senderPhone, textContent,
     const wantsText = /text|likh/i.test(text) && /jawab|jawaab|reply|جواب/i.test(text);
     if (wantsVoice || wantsText) {
       await saveSession(pgPool, senderPhone, { voice_reply: wantsVoice });
-      voiceOut = isAudio || wantsVoice;
+      out.voice = Boolean(isAudio || wantsVoice);
       let next = MENU;
       if (session.agent === 'form' && session.state === 'collecting' && FORMS[session.form_type]) {
         next = askText(FORMS[session.form_type], session.field_index);
@@ -126,9 +126,9 @@ async function processMessage({ sock, pgPool, fromJid, senderPhone, textContent,
   }
 
   if (session.agent === 'form') {
-    await handleFormStep({ pgPool, senderPhone, text, session, send });
+    await handleFormStep({ pgPool, senderPhone, text, session, send, out });
   } else {
-    await handleRouter({ pgPool, senderPhone, text, send });
+    await handleRouter({ pgPool, senderPhone, text, send, out });
   }
 }
 
@@ -141,16 +141,22 @@ async function startForm(pgPool, senderPhone, formType, send) {
     field_index: 0,
     retry_count: 0,
     answers: {},
+    chat_history: [],
   });
   await send(`${form.intro}\n\n${askText(form, 0)}`);
 }
 
-async function handleRouter({ pgPool, senderPhone, text, send }) {
+async function handleRouter({ pgPool, senderPhone, text, send, out }) {
   let intent = matchIntent(text);
 
   if (!intent && /[A-Za-z\u0600-\u06FF]{4,}/.test(text)) {
     try {
-      intent = await ai.classifyIntent(redact(text).text);
+      const c = await ai.classifyIntent(redact(text).text);
+      intent = c.intent;
+      if (c.voice !== null) {
+        await saveSession(pgPool, senderPhone, { voice_reply: c.voice });
+        out.voice = c.voice;
+      }
     } catch (e) {
       console.error('classify failed:', e.message);
     }
@@ -177,7 +183,7 @@ async function handleRouter({ pgPool, senderPhone, text, send }) {
   await send(MENU);
 }
 
-async function handleFormStep({ pgPool, senderPhone, text, session, send }) {
+async function handleFormStep({ pgPool, senderPhone, text, session, send, out }) {
   const form = FORMS[session.form_type];
   if (!form) {
     await resetSession(pgPool, senderPhone);
@@ -196,7 +202,7 @@ async function handleFormStep({ pgPool, senderPhone, text, session, send }) {
       return;
     }
     if (NO_RE.test(text)) {
-      await saveSession(pgPool, senderPhone, { state: 'collecting', field_index: 0, retry_count: 0, answers: {} });
+      await saveSession(pgPool, senderPhone, { state: 'collecting', field_index: 0, retry_count: 0, answers: {}, chat_history: [] });
       await send(`Theek hai, dobara shuru karte hain.\n\n${askText(form, 0)}`);
       return;
     }
@@ -253,11 +259,26 @@ async function handleFormStep({ pgPool, senderPhone, text, session, send }) {
   };
 
   let reply = '';
+  const history = Array.isArray(session.chat_history) ? session.chat_history : [];
   if (retry >= 3 && !isQuestion) {
     reply = field.help;
   } else {
     try {
-      reply = await ai.answerFormQuestion({ formTitle: form.title, field, signal });
+      const r = await ai.answerFormQuestion({ formTitle: form.title, field, signal, history });
+      reply = r.reply;
+      if (r.voice !== null) {
+        out.voice = r.voice;
+        await saveSession(pgPool, senderPhone, { voice_reply: r.voice, retry_count: session.retry_count });
+      }
+      if (reply && userText) {
+        const clean = (s) => s.replace(/[<>]/g, '');
+        const next = [
+          ...history,
+          { role: 'user', text: `<user_text>${clean(userText)}</user_text>` },
+          { role: 'model', text: reply },
+        ];
+        await saveSession(pgPool, senderPhone, { chat_history: next.slice(-8) });
+      }
     } catch (e) {
       console.error('ai failed:', e.message);
     }
