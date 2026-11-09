@@ -8,10 +8,12 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  downloadMediaMessage,
 } = require('@whiskeysockets/baileys');
 const { usePostgresAuthState } = require('./postgresAuthState');
 const { initMessageStore, createMessageStore } = require('./messageStore');
 const { handleIncomingMessage } = require('./handler');
+const { initSchema, cleanupSessions } = require('./db');
 const { Pool } = require('pg');
 
 // Baileys retry counter — tracks how many times each message has been retried
@@ -51,6 +53,8 @@ const messageStore = createMessageStore(pgPool);
 async function initDb() {
   try {
     await initMessageStore(pgPool);
+    await initSchema(pgPool);
+    setInterval(() => cleanupSessions(pgPool).catch((e) => console.error('cleanup failed:', e.message)), 60 * 60 * 1000);
   } catch (err) {
     console.error('Database initialization error:', err);
   }
@@ -154,8 +158,12 @@ async function startBaileys() {
   // Incoming Message Listener (Detect Confirm Order button, typed YES / ہاں, and Screenshots)
   sock.ev.on('messages.upsert', async (m) => {
 
+    // Privacy: only OUTGOING messages are stored (Baileys needs them for retries).
+    // Incoming user text (may contain CNIC etc.) must never be persisted here.
     for (const storedMessage of m.messages) {
-      await messageStore.saveMessage(storedMessage);
+      if (storedMessage.key && storedMessage.key.fromMe) {
+        await messageStore.saveMessage(storedMessage);
+      }
     }
 
     if (m.type !== 'notify') return;
@@ -192,6 +200,7 @@ async function startBaileys() {
           isImage,
           isAudio,
           rawMessage: msg,
+          downloadAudio: () => downloadMediaMessage(msg, 'buffer', {}),
         });
       } catch (err) {
         console.error('handleIncomingMessage error:', err);

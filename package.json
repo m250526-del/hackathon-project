@@ -8,9 +8,11 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "@google/genai": "^3.0.0",
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "ffmpeg-static": "^5.3.0",
     "node-cache": "^5.1.2",
     "pg": "^8.12.0",
     "pino": "^9.2.0",
