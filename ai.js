@@ -17,7 +17,7 @@ const pools = {
 };
 console.log(`[keypool] keys loaded: chat=${pools.chat.size} stt=${pools.stt.size} tts=${pools.tts.size}`);
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 const STT_MODEL = process.env.GEMINI_STT_MODEL || 'gemini-3.8-flash';
 const TTS_MODEL = process.env.GEMINI_TTS_MODEL || 'gemini-3.8-flash-lite-tts';
 const TTS_VOICE = process.env.GEMINI_TTS_VOICE || 'Kore';

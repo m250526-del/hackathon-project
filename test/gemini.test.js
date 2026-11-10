@@ -30,14 +30,14 @@ test('successful first-key request logs a privacy-safe success', async () => {
   const runtime = fakeRuntime();
   const pool = new KeyPool('chat', ['secret-key'], (apiKey) => ({ apiKey }), runtime);
   const result = await pool.run(async (client) => client.apiKey === 'secret-key' && 'ok', {
-    modelId: 'gemini-3.8-flash',
+    modelId: 'gemini-3.5-flash-lite',
     maxAttempts: 1,
   });
 
   assert.equal(result, 'ok');
   assert.equal(runtime.logs[0].finalOutcome, 'success');
   assert.equal(runtime.logs[0].pool, 'chat');
-  assert.equal(runtime.logs[0].modelId, 'gemini-3.8-flash');
+  assert.equal(runtime.logs[0].modelId, 'gemini-3.5-flash-lite');
   assert.equal(JSON.stringify(runtime.logs).includes('secret-key'), false);
 });
 
@@ -49,7 +49,7 @@ test('503 rotates to another key and succeeds', async () => {
     seen.push(client.apiKey);
     if (client.apiKey === 'key-one') throw apiError(503, 'UNAVAILABLE', 'sensitive request content');
     return 'ok';
-  }, { modelId: 'gemini-3.8-flash', maxAttempts: 2, deadlineMs: 2000 });
+  }, { modelId: 'gemini-3.5-flash-lite', maxAttempts: 2, deadlineMs: 2000 });
 
   assert.equal(result, 'ok');
   assert.deepEqual(seen, ['key-one', 'key-two']);
@@ -226,7 +226,7 @@ test('separate pools use fixed model IDs and compatible SDK request options', as
     assert.ok((await ai.speak('hello')).length > 0);
 
     assert.deepEqual(calls.map(({ apiKey, params }) => [apiKey, params.model]), [
-      ['chat-key', 'gemini-3.8-flash'],
+      ['chat-key', 'gemini-3.5-flash-lite'],
       ['stt-key', 'gemini-3.8-flash'],
       ['tts-key', 'gemini-3.8-flash-lite-tts'],
     ]);

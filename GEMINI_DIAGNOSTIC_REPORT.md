@@ -6,7 +6,7 @@ The application defaults to these fixed model IDs; optional environment override
 
 | Pool | Default model | SDK API method and request |
 |---|---|---|
-| Chat | `gemini-3.8-flash` | `models.generateContent`, text contents, system instruction, JSON response mode where requested |
+| Chat | `gemini-3.5-flash-lite` | `models.generateContent`, text contents, system instruction, JSON response mode where requested |
 | STT | `gemini-3.8-flash` | `models.generateContent`, OGG audio as `inlineData` plus transcription instruction |
 | TTS | `gemini-3.8-flash-lite-tts` | `models.generateContent`, `responseModalities: ['AUDIO']`, prebuilt voice `Kore` |
 
