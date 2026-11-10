@@ -13,6 +13,7 @@ const {
 const { usePostgresAuthState } = require('./postgresAuthState');
 const { initMessageStore, createMessageStore } = require('./messageStore');
 const { handleIncomingMessage } = require('./handler');
+const ai = require('./ai');
 const { initSchema, cleanupSessions } = require('./db');
 const { Pool } = require('pg');
 
@@ -22,6 +23,9 @@ const msgRetryCounterCache = new NodeCache({ stdTTL: 60 * 60, useClones: false }
 const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
+  max: 5,
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000,
 });
 
 const PORT = process.env.PORT || 3000;
@@ -70,7 +74,7 @@ app.use(express.json());
 
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
-  if (req.path === '/qr' || req.path === '/relink') {
+  if (req.path === '/qr' || req.path === '/relink' || req.path === '/ai-test') {
     if (!QR_TOKEN || req.query.token !== QR_TOKEN) {
       return res.status(401).send('unauthorized');
     }
@@ -96,6 +100,16 @@ app.get('/qr', async (req, res) => {
     res.type('png').send(png);
   } catch (err) {
     res.status(500).send('Failed to render QR code.');
+  }
+});
+
+app.get('/ai-test', async (req, res) => {
+  const started = Date.now();
+  try {
+    const r = await ai.classifyIntent('mujhe shanakhti card banwana hai');
+    res.json({ ok: true, ms: Date.now() - started, result: r, expected_intent: 'id_card' });
+  } catch (e) {
+    res.status(500).json({ ok: false, ms: Date.now() - started, error: String((e && e.message) || e).slice(0, 300) });
   }
 });
 

@@ -9,6 +9,14 @@ const { redact } = require('./redact');
 const { toAsciiDigits } = require('./validators');
 const ai = require('./ai');
 
+function withTimeout(promise, ms, label) {
+  let t;
+  const timer = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timer]).finally(() => clearTimeout(t));
+}
+
 const MENU =
   'Assalam o Alaikum! Main aap ki form bharne mein madad karunga.\n\n' +
   'Aap kya karna chahte hain?\n' +
@@ -56,7 +64,7 @@ const queues = new Map();
 function handleIncomingMessage(ctx) {
   const key = ctx.senderPhone;
   const prev = queues.get(key) || Promise.resolve();
-  const next = prev.catch(() => {}).then(() => processMessage(ctx));
+  const next = prev.catch(() => {}).then(() => withTimeout(processMessage(ctx), 60000, 'processMessage'));
   queues.set(key, next);
   next.catch(() => {}).finally(() => {
     if (queues.get(key) === next) queues.delete(key);
@@ -143,6 +151,7 @@ async function processMessage({ sock, pgPool, fromJid, senderPhone, textContent,
 
   const session = await getSession(pgPool, senderPhone);
   const out = { voice: Boolean(isAudio || session.voice_reply) };
+  console.log('[SESSION]', { phoneLast4: senderPhone.slice(-4), agent: session.agent, state: session.state, voice: out.voice });
 
   const send = async (text, textOnly) => {
     if (out.voice && !textOnly) {
@@ -153,7 +162,13 @@ async function processMessage({ sock, pgPool, fromJid, senderPhone, textContent,
         console.error('tts failed:', e.message);
       }
     }
-    await sock.sendMessage(fromJid, { text });
+    try {
+      await withTimeout(sock.sendMessage(fromJid, { text }), 20000, 'sendMessage');
+      console.log('[SEND] text ok', { phoneLast4: senderPhone.slice(-4) });
+    } catch (e) {
+      console.error('[SEND] text failed:', e.message);
+      throw e;
+    }
   };
 
   let text = textContent;
@@ -268,6 +283,7 @@ async function handleRouter(ctx) {
     try {
       const c = await ai.classifyIntent(redact(text).text);
       intent = c.intent;
+      console.log('[ROUTER] ai intent:', intent);
       if (c.voice !== null) {
         await saveSession(pgPool, senderPhone, { voice_reply: c.voice });
         out.voice = c.voice;

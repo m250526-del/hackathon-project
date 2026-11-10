@@ -4,6 +4,14 @@ const { spawn } = require('child_process');
 const ffmpegPath = require('ffmpeg-static');
 const { KeyPool, parseKeys } = require('./keypool');
 
+function withTimeout(promise, ms, label) {
+  let t;
+  const timer = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timer]).finally(() => clearTimeout(t));
+}
+
 function keysFor(listVar) {
   const list = parseKeys(listVar);
   if (list.length) return list;
@@ -124,12 +132,15 @@ async function callWithModel(kind, configuredModel, run) {
 }
 
 async function ask(system, contents, json) {
+  const started = Date.now();
   const config = { systemInstruction: system, temperature: 0.3 };
   if (json) config.responseMimeType = 'application/json';
   const r = await callWithModel('chat', MODEL, (model) =>
     pools.chat.run((c) => c.models.generateContent({ model, contents, config }))
   );
-  return (r.text || '').trim();
+  const text = (r.text || '').trim();
+  console.log('[ai] chat ok', { ms: Date.now() - started, chars: text.length });
+  return text;
 }
 
 function clean(s) {
@@ -151,6 +162,7 @@ async function classifyIntent(redactedText) {
       voice: typeof v.voice === 'boolean' ? v.voice : null,
     };
   } catch (e) {
+    console.error('[ai] classifyIntent: model output was not valid JSON, chars =', String(out).length);
     return { intent: 'unknown', voice: null };
   }
 }
@@ -283,4 +295,13 @@ async function pickField(labels, redactedText) {
   return 0;
 }
 
-module.exports = { classifyIntent, answerFormQuestion, transcribe, speak, classifyReverseIntent, reverseLine, pickField };
+const wrap = (fn, ms, label) => (...args) => withTimeout(fn(...args), ms, label);
+module.exports = {
+  classifyIntent: wrap(classifyIntent, 12000, 'classifyIntent'),
+  answerFormQuestion: wrap(answerFormQuestion, 12000, 'answerFormQuestion'),
+  transcribe: wrap(transcribe, 25000, 'transcribe'),
+  speak: wrap(speak, 25000, 'speak'),
+  classifyReverseIntent: wrap(classifyReverseIntent, 12000, 'classifyReverseIntent'),
+  reverseLine: wrap(reverseLine, 12000, 'reverseLine'),
+  pickField: wrap(pickField, 12000, 'pickField'),
+};
