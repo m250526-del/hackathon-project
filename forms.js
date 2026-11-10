@@ -98,17 +98,17 @@ const licenseType = {
 const FORMS = {
   id_card: {
     title: 'Shanakhti card (ID card) - demo',
-    intro: 'Theek hai, hum shanakhti card ka demo form bharte hain. Main aap se ek ek kar ke sawal poochunga. Kisi bhi waqt "back" likhein peechay jane ke liye, ya "menu" likhein wapas shuru karne ke liye.',
+    intro: 'Theek hai, hum shanakhti card ka demo form bharte hain. Main aap se ek ek kar ke sawal poochunga. Agar kisi bhi waqt peechay jana ho ya shuru se karna ho to bas bata dein.',
     fields: [fullName, fatherName, cnic, dob, address],
   },
   health_card: {
     title: 'Sehat card - demo',
-    intro: 'Theek hai, hum sehat card ka demo form bharte hain. Main aap se ek ek kar ke sawal poochunga. Kisi bhi waqt "back" likhein peechay jane ke liye, ya "menu" likhein wapas shuru karne ke liye.',
+    intro: 'Theek hai, hum sehat card ka demo form bharte hain. Main aap se ek ek kar ke sawal poochunga. Agar kisi bhi waqt peechay jana ho ya shuru se karna ho to bas bata dein.',
     fields: [fullName, cnic, dob, phone, familySize],
   },
   license: {
     title: 'Driving license - demo',
-    intro: 'Theek hai, hum driving license ka demo form bharte hain. Main aap se ek ek kar ke sawal poochunga. Kisi bhi waqt "back" likhein peechay jane ke liye, ya "menu" likhein wapas shuru karne ke liye.',
+    intro: 'Theek hai, hum driving license ka demo form bharte hain. Main aap se ek ek kar ke sawal poochunga. Agar kisi bhi waqt peechay jana ho ya shuru se karna ho to bas bata dein.',
     fields: [fullName, cnic, dob, licenseType, address],
   },
 };

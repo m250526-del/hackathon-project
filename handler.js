@@ -18,23 +18,20 @@ function withTimeout(promise, ms, label) {
 }
 
 const MENU =
-  'Assalam o Alaikum! Main aap ki form bharne mein madad karunga.\n\n' +
-  'Aap kya karna chahte hain?\n' +
-  '1 - Shanakhti card (ID card) ka form\n' +
-  '2 - Sehat card ka form\n' +
-  '3 - Driving license ka form\n' +
-  '4 - Apni application ka status dekhna\n\n' +
-  'Bas number likh kar bhej dein, ya voice note bhejein. Kisi bhi waqt "menu" likhein to wapas yahin aa jayenge.';
+  'Assalam o Alaikum! Main aap ki sarkari forms bharne mein madad karta hoon.\n\n' +
+  'Aap in mein se kisi ke liye madad le sakte hain:\n' +
+  '1. Shanakhti card (ID card) ka form\n' +
+  '2. Sehat card ka form\n' +
+  '3. Driving license ka form\n' +
+  '4. Apni application ka status\n\n' +
+  'Aap bas bata dein ke aap ko kya chahiye, apne alfaaz mein ya kisi option ka naam ya number bata kar. Voice note bhi bhej sakte hain.';
 
 const VOICE_PATH = path.join(__dirname, 'assets', 'reverse-mode.ogg');
 
 const REVERSE_HINT =
-  'Aap "mera form" likh kar apna form dekh sakte hain, "status" likh kar halat pooch sakte hain, ya "focal person" likh kar mutaliqa afsar ka rabta maang sakte hain. Wapas jane ke liye "exit" likhein.';
+  'Aap mujh se apne form, apni application ki halat ya mutaliqa afsar (focal person) ke baare mein kuch bhi pooch sakte hain. Jab aur kuch na poochna ho to bata dein, main aap ko wapas shuru par le jaunga.';
 
 const REVERSE_TEXT = `Mode: Reverse. Ab aap ka form lock ho chuka hai.\n\n${REVERSE_HINT}`;
-
-const REFUSAL =
-  'Ye sahulat (form dekhna, status, focal person) form jama karne ke baad Reverse mode mein milti hai. Pehle form mukammal karein.';
 
 const STATUS_LABELS = {
   submitted: 'jama ho chuki hai',
@@ -57,6 +54,7 @@ const QUESTION_RE = /[?؟]|\b(?:kahan|kahaan|kidhar|where|kya hota|kya hai|kya l
 const CONFIRM_RE = /^(y|yes|ha+n?|haan|han|ji|ji haan|theek|sahi|ok|okay|ہاں|جی)$/i;
 const RESTART_RE = /^(dobara|restart|naya|new)$/i;
 const READ_RE = /status|halat|حالت|focal|rabta|raabta|رابطہ|contact|mera form|my form|form dikha|form dekh/i;
+const NAV_RE = /\b(back|wapas|peeche|pichay|pichla|menu|shuru|cancel|exit)\b|پیچھے|واپس|شروع/i;
 const WORDS_RE = /[A-Za-z\u0600-\u06FF]{4,}/;
 
 const queues = new Map();
@@ -80,6 +78,15 @@ function matchIntent(t) {
   return null;
 }
 
+function digitIntent(t) {
+  const n = toAsciiDigits(t).trim();
+  if (n === '1') return 'id_card';
+  if (n === '2') return 'health_card';
+  if (n === '3') return 'license';
+  if (n === '4') return 'status';
+  return null;
+}
+
 function askText(form, index) {
   return `Sawal ${index + 1}/${form.fields.length}: ${form.fields[index].ask}`;
 }
@@ -89,7 +96,7 @@ function summaryText(form, answers) {
   return (
     'Meharbani. Aap ka form ye hai:\n\n' +
     lines.join('\n') +
-    `\n\nAgar sab theek hai to "haan" likhein.\nKuch badalna ho to us ka number (1-${form.fields.length}) likhein.\nSab dobara bharne ke liye "dobara" likhein.`
+    '\n\nKya sab theek hai? Agar kuch badalna ho to bata dein kaun si cheez badalni hai, ya chahein to poora form dobara bhar sakte hain.'
   );
 }
 
@@ -131,6 +138,26 @@ function reprompt(session) {
     return askText(form, session.field_index);
   }
   return MENU;
+}
+
+async function remember(pgPool, senderPhone, history, rawText, reply) {
+  const red = redact(rawText);
+  if (!red.hasWords || !reply) return;
+  const strip = (s) => s.replace(/[<>]/g, '');
+  const next = [
+    ...history,
+    { role: 'user', text: `<user_text>${strip(red.text)}</user_text>` },
+    { role: 'model', text: reply },
+  ];
+  await saveSession(pgPool, senderPhone, { chat_history: next.slice(-8) });
+}
+
+async function leaveToMenu(ctx, lead) {
+  const { pgPool, senderPhone, send } = ctx;
+  await resetSession(pgPool, senderPhone);
+  await saveSession(pgPool, senderPhone, { chat_history: [] });
+  if (lead) await send(`${lead}\n\n${MENU}`);
+  else await send(MENU);
 }
 
 async function safeLine(type, status, text) {
@@ -274,15 +301,17 @@ async function startForm(ctx, formType) {
 }
 
 async function handleRouter(ctx) {
-  const { pgPool, senderPhone, text, send, out } = ctx;
-  let intent = matchIntent(text);
+  const { pgPool, senderPhone, text, session, send, out } = ctx;
+  let history = [];
+  if (Array.isArray(session.chat_history)) history = session.chat_history;
+  let intent = digitIntent(text);
+  let reply = '';
 
-  if (!intent && READ_RE.test(text)) intent = 'read';
-
-  if (!intent && WORDS_RE.test(text)) {
+  if (!intent) {
     try {
-      const c = await ai.classifyIntent(redact(text).text);
+      const c = await ai.classifyIntent(redact(text).text, history);
       intent = c.intent;
+      reply = c.reply;
       console.log('[ROUTER] ai intent:', intent);
       if (c.voice !== null) {
         await saveSession(pgPool, senderPhone, { voice_reply: c.voice });
@@ -290,6 +319,7 @@ async function handleRouter(ctx) {
       }
     } catch (e) {
       console.error('classify failed:', e.message);
+      intent = matchIntent(text);
     }
   }
 
@@ -298,24 +328,26 @@ async function handleRouter(ctx) {
     return;
   }
 
-  if (intent === 'status' || intent === 'read') {
+  if (intent === 'status') {
     const apps = await listApplicationsForPhone(pgPool, senderPhone);
     if (apps.length === 0) {
-      await send('Is number se abhi tak koi form jama nahi hua. Form bharne ke liye chunein:\n\n' + MENU);
+      await send('Is number se abhi tak koi form jama nahi hua. Aap chahein to ID card, sehat card ya driving license ka form bhar sakte hain.');
       return;
     }
-    if (intent === 'status') {
-      const lines = apps.map((a) => {
-        let title = a.form_type;
-        if (FORMS[a.form_type]) title = FORMS[a.form_type].title;
-        let extra = '';
-        if (a.mode === 'normal') extra = ' (dobara khula hai)';
-        return `${title} - ${ref(a.id)} - halat: ${statusLabel(a.status)}${extra}`;
-      });
-      await send(`Aap ki applications:\n\n${lines.join('\n')}\n\n${MENU}`);
-      return;
-    }
-    await send('Apna form dekhne ya status poochne ke liye pehle form chunein:\n\n' + MENU);
+    const lines = apps.map((a) => {
+      let title = a.form_type;
+      if (FORMS[a.form_type]) title = FORMS[a.form_type].title;
+      let extra = '';
+      if (a.mode === 'normal') extra = ' (dobara khula hai)';
+      return `${title} - ${ref(a.id)} - halat: ${statusLabel(a.status)}${extra}`;
+    });
+    await send(`Aap ki applications:\n\n${lines.join('\n')}\n\nAur kisi cheez mein madad chahiye to bata dein.`, true);
+    return;
+  }
+
+  if (reply) {
+    await remember(pgPool, senderPhone, history, text, reply);
+    await send(reply);
     return;
   }
 
@@ -349,13 +381,6 @@ async function handleFormStep(ctx) {
     return;
   }
 
-  if (text.length < 60 && READ_RE.test(text)) {
-    let again = '';
-    if (state === 'collecting' || state === 'editing') again = `\n\n${askText(form, session.field_index)}`;
-    await send(REFUSAL + again);
-    return;
-  }
-
   if (state === 'confirming') {
     await handleConfirming(ctx, form);
     return;
@@ -374,53 +399,57 @@ async function handleReverse(ctx, form) {
   }
 
   if (RESET_RE.test(text)) {
-    await resetSession(pgPool, senderPhone);
-    await send(MENU);
+    await leaveToMenu(ctx, '');
     return;
   }
 
-  if (text.toLowerCase() === 'exit') {
-    await resetSession(pgPool, senderPhone);
-    await send(MENU);
+  let history = [];
+  if (Array.isArray(session.chat_history)) history = session.chat_history;
+
+  let turn = { action: 'chat', reply: '' };
+  try {
+    turn = await ai.reverseTurn({ redactedText: redact(text).text, history, status: app.status });
+  } catch (e) {
+    console.error('reverse turn failed:', e.message);
+  }
+
+  if (turn.action === 'exit') {
+    await leaveToMenu(ctx, turn.reply);
     return;
   }
 
-  let intent = 'other';
-  if (WORDS_RE.test(text)) {
-    try {
-      intent = await ai.classifyReverseIntent(redact(text).text);
-    } catch (e) {
-      console.error('reverse classify failed:', e.message);
-    }
-  }
-
-  if (intent === 'exit') {
-    await resetSession(pgPool, senderPhone);
-    await send(MENU);
+  if (turn.action === 'show_status') {
+    let lead = turn.reply;
+    if (!lead) lead = LINES.status;
+    await remember(pgPool, senderPhone, history, text, lead);
+    await send(`${lead}\n\nReference: ${ref(app.id)}\nForm: ${form.title}\nHalat: ${statusLabel(app.status)}`, true);
     return;
   }
 
-  if (intent === 'status') {
-    const line = await safeLine('status', app.status, text);
-    const extra = `Reference: ${ref(app.id)}\nForm: ${form.title}\nHalat: ${statusLabel(app.status)}`;
-    await send(`${line}\n${extra}`);
-    return;
-  }
-
-  if (intent === 'focal') {
+  if (turn.action === 'show_focal') {
+    let lead = turn.reply;
+    if (!lead) lead = LINES.focal;
+    await remember(pgPool, senderPhone, history, text, lead);
     const focal = await getFocal(pgPool, session.form_type);
-    const line = await safeLine('focal', app.status, text);
     if (focal) {
-      await send(`${line}\n${focal.name}\n${focal.email}`);
+      await send(`${lead}\n\n${focal.name}\n${focal.email}`, true);
     } else {
-      await send(`${line}\nNo focal person found.`);
+      await send('Is form ke liye abhi koi focal person darj nahi hai.', true);
     }
     return;
   }
 
-  if (intent === 'view_form') {
-    const line = await safeLine('view_form', app.status, text);
-    await send(`${line}\n${formView(form, app.data)}`);
+  if (turn.action === 'show_form') {
+    let lead = turn.reply;
+    if (!lead) lead = LINES.view_form;
+    await remember(pgPool, senderPhone, history, text, lead);
+    await send(`${lead}\n\n${formView(form, app.data)}`, true);
+    return;
+  }
+
+  if (turn.reply) {
+    await remember(pgPool, senderPhone, history, text, turn.reply);
+    await send(turn.reply);
     return;
   }
 
@@ -435,7 +464,7 @@ async function handleConfirming(ctx, form) {
   const { sock, fromJid, pgPool, senderPhone, text, session, send } = ctx;
   const answers = session.answers || {};
 
-  if (CONFIRM_RE.test(text)) {
+  const submit = async () => {
     const id = await createApplication(pgPool, senderPhone, session.form_type, answers);
     await saveSession(pgPool, senderPhone, { state: 'reverse', field_index: 0, retry_count: 0, answers: {}, chat_history: [] });
     await send(`Aap ka form jama ho gaya aur lock ho gaya hai.\nReference number: ${ref(id)}`, true);
@@ -447,19 +476,27 @@ async function handleConfirming(ctx, form) {
         console.error('voice note failed:', e.message);
       }
     }
-    return;
-  }
+  };
 
-  if (RESTART_RE.test(text)) {
+  const restart = async () => {
     await saveSession(pgPool, senderPhone, { state: 'collecting', field_index: 0, retry_count: 0, answers: {}, chat_history: [] });
     await send(`Theek hai, dobara shuru karte hain.\n\n${askText(form, 0)}`);
-    return;
-  }
+  };
 
   const openField = async (num) => {
     await saveSession(pgPool, senderPhone, { state: 'editing', field_index: num - 1, retry_count: 0 });
     await send(`Theek hai, naya jawab likhein.\n\n${askText(form, num - 1)}`);
   };
+
+  if (CONFIRM_RE.test(text)) {
+    await submit();
+    return;
+  }
+
+  if (RESTART_RE.test(text)) {
+    await restart();
+    return;
+  }
 
   const typed = toAsciiDigits(text).trim();
   if (/^\d{1,2}$/.test(typed)) {
@@ -472,16 +509,28 @@ async function handleConfirming(ctx, form) {
     return;
   }
 
-  let picked = 0;
+  let turn = { action: 'chat', field: 0, reply: '' };
   if (WORDS_RE.test(text)) {
     try {
-      picked = await ai.pickField(form.fields.map((f) => f.label), redact(text).text);
+      turn = await ai.reviewTurn({ labels: form.fields.map((f) => f.label), redactedText: redact(text).text, history: [] });
     } catch (e) {
-      console.error('pick field failed:', e.message);
+      console.error('review turn failed:', e.message);
     }
   }
-  if (picked >= 1 && picked <= form.fields.length) {
-    await openField(picked);
+  if (turn.action === 'confirm') {
+    await submit();
+    return;
+  }
+  if (turn.action === 'restart') {
+    await restart();
+    return;
+  }
+  if (turn.action === 'edit' && turn.field >= 1 && turn.field <= form.fields.length) {
+    await openField(turn.field);
+    return;
+  }
+  if (turn.reply) {
+    await send(turn.reply);
     return;
   }
 
@@ -510,7 +559,7 @@ async function handleCollecting(ctx, form) {
     return;
   }
 
-  const isQuestion = QUESTION_RE.test(text);
+  const isQuestion = QUESTION_RE.test(text) || READ_RE.test(text) || NAV_RE.test(text);
   let result = { ok: false, reason: 'question' };
   if (!isQuestion) result = field.validate(text);
 
@@ -558,6 +607,24 @@ async function handleCollecting(ctx, form) {
     try {
       const r = await ai.answerFormQuestion({ formTitle: form.title, field, signal, history });
       reply = r.reply;
+      if (r.nav === 'menu') {
+        await resetSession(pgPool, senderPhone);
+        await saveSession(pgPool, senderPhone, { chat_history: [] });
+        await send(`${r.reply}\n\n${MENU}`);
+        return;
+      }
+      if (r.nav === 'back') {
+        if (state === 'editing') {
+          await saveSession(pgPool, senderPhone, { state: 'confirming', field_index: form.fields.length, retry_count: 0 });
+          await send(summaryText(form, answers), true);
+          return;
+        }
+        if (index > 0) {
+          await saveSession(pgPool, senderPhone, { field_index: index - 1, retry_count: 0 });
+          await send(`${r.reply}\n\n${askText(form, index - 1)}`);
+          return;
+        }
+      }
       if (r.voice !== null) {
         out.voice = r.voice;
         await saveSession(pgPool, senderPhone, { voice_reply: r.voice, retry_count: session.retry_count });
