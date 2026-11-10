@@ -13,7 +13,7 @@ function keysFor(listVar) {
 const pools = {
   chat: new KeyPool('chat', keysFor('GEMINI_CHAT_KEYS')),
   stt: new KeyPool('stt', keysFor('GEMINI_STT_KEYS')),
-  tts: new KeyPool('tts', keysFor('GEMINI_TTS_KEYS')),
+  tts: new KeyPool('tts', keysFor('GEMINI_TTS_KEYS'), (apiKey) => ({ apiKey })),
 };
 console.log(`[keypool] keys loaded: chat=${pools.chat.size} stt=${pools.stt.size} tts=${pools.tts.size}`);
 
@@ -214,41 +214,43 @@ function audioToOgg(buffer, mimeType) {
   });
 }
 
-function ttsConfig(shape) {
-  if (shape === 'new') {
-    return { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { voice: TTS_VOICE } } };
-  }
-  return { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: TTS_VOICE } } } };
-}
-
+// TTS uses Google's REST API directly. The SDK request was rejected with HTTP 400
+// while the identical REST request succeeds (verified with scripts/tts-probe.js).
 async function speak(text) {
-  let shapes = ['old', 'new'];
-  if (/3\.8/.test(TTS_MODEL)) shapes = ['new', 'old'];
-  let firstError = null;
-  for (const shape of shapes) {
-    try {
-      const r = await pools.tts.run(
-        (c, request) =>
-          generateContent(c, {
-            model: TTS_MODEL,
-            contents: [{ role: 'user', parts: [{ text }] }],
-            config: ttsConfig(shape),
-          }, request),
-        { modelId: TTS_MODEL, ...REQUESTS.tts }
-      );
-      let parts = [];
-      if (r.candidates && r.candidates[0] && r.candidates[0].content && r.candidates[0].content.parts) {
-        parts = r.candidates[0].content.parts;
+  const json = await pools.tts.run(
+    async (c, request) => {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent`;
+      const res = await globalThis.fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': c.apiKey },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text }] }],
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: { voiceConfig: { voice: TTS_VOICE } },
+          },
+        }),
+        signal: request.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = new Error(`tts http ${res.status}`);
+        err.status = res.status;
+        err.error = data && data.error ? data.error : null;
+        err.headers = res.headers;
+        throw err;
       }
-      const part = parts.find((p) => p.inlineData && p.inlineData.data);
-      if (!part) throw new Error('tts returned no audio');
-      return await audioToOgg(Buffer.from(part.inlineData.data, 'base64'), part.inlineData.mimeType);
-    } catch (e) {
-      console.error(`[tts] shape=${shape} failed:`, String((e && e.message) || e).slice(0, 200));
-      if (!firstError) firstError = e;
-    }
+      return data;
+    },
+    { modelId: TTS_MODEL, ...REQUESTS.tts }
+  );
+  let parts = [];
+  if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts) {
+    parts = json.candidates[0].content.parts;
   }
-  throw firstError;
+  const part = parts.find((p) => p.inlineData && p.inlineData.data);
+  if (!part) throw new Error('tts returned no audio');
+  return audioToOgg(Buffer.from(part.inlineData.data, 'base64'), part.inlineData.mimeType);
 }
 
 async function classifyReverseIntent(redactedText) {
