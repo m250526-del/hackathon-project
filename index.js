@@ -100,7 +100,7 @@ app.use(express.json());
 
 app.use((req, res, next) => {
   if (req.path === '/health') return next();
-  if (req.path === '/qr' || req.path === '/relink' || req.path === '/ai-test') {
+  if (req.path === '/qr' || req.path === '/relink' || req.path === '/ai-test' || req.path === '/tts-test') {
     if (!QR_TOKEN || req.query.token !== QR_TOKEN) {
       return res.status(401).send('unauthorized');
     }
@@ -134,6 +134,16 @@ app.get('/ai-test', async (req, res) => {
   try {
     const r = await ai.classifyIntent('mujhe shanakhti card banwana hai');
     res.json({ ok: true, ms: Date.now() - started, result: r, expected_intent: 'id_card' });
+  } catch (e) {
+    res.status(500).json({ ok: false, ms: Date.now() - started, error: String((e && e.message) || e).slice(0, 300) });
+  }
+});
+
+app.get('/tts-test', async (req, res) => {
+  const started = Date.now();
+  try {
+    const audio = await ai.speak('Assalam o alaikum, ye awaz ka test hai.');
+    res.json({ ok: true, ms: Date.now() - started, bytes: audio.length });
   } catch (e) {
     res.status(500).json({ ok: false, ms: Date.now() - started, error: String((e && e.message) || e).slice(0, 300) });
   }

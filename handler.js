@@ -56,6 +56,8 @@ const RESTART_RE = /^(dobara|restart|naya|new)$/i;
 const READ_RE = /status|halat|حالت|focal|rabta|raabta|رابطہ|contact|mera form|my form|form dikha|form dekh/i;
 const NAV_RE = /\b(back|wapas|peeche|pichay|pichla|menu|shuru|cancel|exit)\b|پیچھے|واپس|شروع/i;
 const WORDS_RE = /[A-Za-z\u0600-\u06FF]{4,}/;
+const VOICE_GATE_RE = /voice|awaz|awaaz|aawaz|audio|آواز|آڈیو|\bbol\s*kar\b|\bbolkar\b|\bsun(?:a|ao|ana|na)\b|\bspeak\b|\btext\b|likh\s*kar|likhkar/i;
+const VOICE_REQ_RE = /jawab|jawaab|reply|answer|baat|bhej|karo|kar\b|do\b|dein|chahiye|chahta|chahti|please|plz|سن|جواب|کرو|کریں|چاہیے/i;
 
 const queues = new Map();
 
@@ -177,24 +179,31 @@ async function processMessage({ sock, pgPool, fromJid, senderPhone, textContent,
   console.log('[INCOMING]', { phoneLast4: senderPhone.slice(-4), textLength: textContent.length, isImage, isAudio });
 
   const session = await getSession(pgPool, senderPhone);
-  const out = { voice: Boolean(isAudio || session.voice_reply) };
+  const out = { voice: Boolean(isAudio || session.voice_reply), ttsNotified: false };
   console.log('[SESSION]', { phoneLast4: senderPhone.slice(-4), agent: session.agent, state: session.state, voice: out.voice });
 
   const send = async (text, textOnly) => {
-    if (out.voice && !textOnly) {
-      try {
-        const audio = await ai.speak(text.slice(0, 700));
-        await sock.sendMessage(fromJid, { audio, mimetype: 'audio/ogg; codecs=opus', ptt: true });
-      } catch (e) {
-        console.error('tts failed:', e.message);
-      }
-    }
     try {
       await withTimeout(sock.sendMessage(fromJid, { text }), 20000, 'sendMessage');
       console.log('[SEND] text ok', { phoneLast4: senderPhone.slice(-4) });
     } catch (e) {
       console.error('[SEND] text failed:', e.message);
       throw e;
+    }
+    if (out.voice && !textOnly) {
+      try {
+        const audio = await withTimeout(ai.speak(text.slice(0, 700)), 50000, 'tts');
+        await sock.sendMessage(fromJid, { audio, mimetype: 'audio/ogg; codecs=opus', ptt: true });
+        console.log('[SEND] voice ok', { phoneLast4: senderPhone.slice(-4) });
+      } catch (e) {
+        console.error('tts failed:', e.message);
+        if (!out.ttsNotified) {
+          out.ttsNotified = true;
+          try {
+            await sock.sendMessage(fromJid, { text: 'Voice note abhi nahi ban saka, is liye text mein jawab de raha hoon.' });
+          } catch (ignored) {}
+        }
+      }
     }
   };
 
@@ -233,16 +242,38 @@ async function processMessage({ sock, pgPool, fromJid, senderPhone, textContent,
     return;
   }
 
-  if (text.length < 80) {
-    const wantsVoice = /voice|awaz|audio|آواز/i.test(text) && /jawab|jawaab|reply|sun|جواب|سن/i.test(text);
-    const wantsText = /text|likh/i.test(text) && /jawab|jawaab|reply|جواب/i.test(text);
-    if (wantsVoice || wantsText) {
-      await saveSession(pgPool, senderPhone, { voice_reply: wantsVoice });
-      out.voice = Boolean(isAudio || wantsVoice);
-      const next = reprompt(session);
-      if (wantsVoice) await send(`Theek hai, ab main voice note mein jawab dunga.\n\n${next}`);
-      else await send(`Theek hai, ab main likh kar jawab dunga.\n\n${next}`);
-      return;
+  if (text.length < 120 && !isSensitiveNow(session) && VOICE_GATE_RE.test(text)) {
+    let eligible = true;
+    if (session.agent === 'form' && (session.state === 'collecting' || session.state === 'editing')) {
+      eligible = VOICE_REQ_RE.test(text);
+    }
+    if (eligible) {
+      let change = null;
+      let lead = '';
+      try {
+        const v = await ai.classifyVoice(redact(text).text);
+        change = v.voice;
+        lead = v.reply;
+      } catch (e) {
+        console.error('voice classify failed:', e.message);
+        const wantsVoice = /voice|awaz|audio|آواز/i.test(text) && /jawab|jawaab|reply|sun|جواب|سن/i.test(text);
+        const wantsText = /text|likh/i.test(text) && /jawab|jawaab|reply|جواب/i.test(text);
+        if (wantsVoice) change = true;
+        else if (wantsText) change = false;
+      }
+      if (change !== null) {
+        await saveSession(pgPool, senderPhone, { voice_reply: change });
+        out.voice = change;
+        if (!lead && change) lead = 'Theek hai, ab main aap ko voice note mein jawab dunga.';
+        if (!lead && !change) lead = 'Theek hai, ab main likh kar jawab dunga.';
+        let again = '';
+        const fm = FORMS[session.form_type];
+        if (session.agent === 'form' && fm && (session.state === 'collecting' || session.state === 'editing')) {
+          again = `\n\n${askText(fm, session.field_index)}`;
+        }
+        await send(lead + again);
+        return;
+      }
     }
   }
 
