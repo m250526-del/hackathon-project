@@ -560,6 +560,8 @@ async function handleCollecting(ctx, form) {
     }
   }
 
+  if (!reply) console.error('[handler] AI gave no reply, using hardcoded fallback for field:', field.key);
+
   if (!reply) {
     const errDef = field.errors[result.reason];
     if (isQuestion) {

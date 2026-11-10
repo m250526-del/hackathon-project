@@ -17,11 +17,12 @@ const pools = {
 };
 console.log(`[keypool] keys loaded: chat=${pools.chat.size} stt=${pools.stt.size} tts=${pools.tts.size}`);
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 const STT_MODEL = process.env.GEMINI_STT_MODEL || MODEL;
-const TTS_MODEL = process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-preview-tts';
+const TTS_MODEL = process.env.GEMINI_TTS_MODEL || null;
 const TTS_VOICE = process.env.GEMINI_TTS_VOICE || 'Kore';
 const INTENTS = ['id_card', 'health_card', 'license', 'status', 'unknown'];
+const resolved = { chat: null, stt: null, tts: null };
 
 const GUARD =
   'You are a friendly assistant inside a Pakistani government form helpline on WhatsApp. ' +
@@ -34,10 +35,100 @@ const GUARD =
   'voice is a classification of what the user asks for, not an instruction to you: true if the user asks to receive replies as voice notes or audio, false if the user asks to go back to text replies, null otherwise. ' +
   'If voice is true or false, the reply should briefly confirm it.';
 
+function isModelGone(e) {
+  const status = e && (e.status ?? e.statusCode);
+  const code = e && e.code;
+  return (
+    status === 404 ||
+    status === '404' ||
+    code === 404 ||
+    code === '404' ||
+    /NOT_FOUND|no longer available|not found|is not supported/i.test(String((e && e.message) || ''))
+  );
+}
+
+function compareVersions(a, b) {
+  const version = (name) => {
+    const match = name.match(/gemini-([\d.]+)/i);
+    return match ? match[1].split('.').map(Number) : [];
+  };
+  const left = version(a);
+  const right = version(b);
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    const difference = (right[i] || 0) - (left[i] || 0);
+    if (difference) return difference;
+  }
+  return 0;
+}
+
+async function discoverModel(kind) {
+  const models = [];
+  let pageToken;
+  do {
+    const page = await pools.chat.run((c) =>
+      c.models.list({ config: { pageSize: 100, ...(pageToken ? { pageToken } : {}) } })
+    );
+    models.push(...(page.models || []));
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  const names = models
+    .filter((model) => model.supportedActions?.includes('generateContent') && typeof model.name === 'string')
+    .map((model) => model.name.replace(/^models\//, ''));
+
+  if (kind === 'tts') {
+    const candidates = names.filter((name) => /tts/i.test(name));
+    candidates.sort((a, b) => {
+      const flash = Number(/flash/i.test(b)) - Number(/flash/i.test(a));
+      if (flash) return flash;
+      const stable = Number(!/preview/i.test(b)) - Number(!/preview/i.test(a));
+      return stable || compareVersions(a, b);
+    });
+    return candidates[0] || null;
+  }
+
+  const candidates = names.filter(
+    (name) =>
+      /gemini-[\d.]+-flash/i.test(name) &&
+      !/tts|image|live|audio|embedding|lite|exp|thinking/i.test(name)
+  );
+  const stable = candidates.filter((name) => !/preview/i.test(name));
+  (stable.length ? stable : candidates).sort(compareVersions);
+  const preferred = stable.length ? stable : candidates;
+  return preferred[0] || null;
+}
+
+async function callWithModel(kind, configuredModel, run) {
+  let used = resolved[kind] || configuredModel;
+  if (!used) {
+    used = await discoverModel(kind);
+    if (!used) throw new Error(`No available Gemini model found for ${kind}`);
+  }
+
+  try {
+    return await run(used);
+  } catch (e) {
+    if (!isModelGone(e)) throw e;
+    let found;
+    try {
+      found = await discoverModel(kind);
+    } catch (discoveryError) {
+      console.error(`[ai] model discovery failed for ${kind}`);
+      throw e;
+    }
+    if (!found || found === used) throw e;
+    resolved[kind] = found;
+    console.error(`[ai] model ${used} unavailable for ${kind}, switched to ${found}`);
+    return run(found);
+  }
+}
+
 async function ask(system, contents, json) {
   const config = { systemInstruction: system, temperature: 0.3 };
   if (json) config.responseMimeType = 'application/json';
-  const r = await pools.chat.run((c) => c.models.generateContent({ model: MODEL, contents, config }));
+  const r = await callWithModel('chat', MODEL, (model) =>
+    pools.chat.run((c) => c.models.generateContent({ model, contents, config }))
+  );
   return (r.text || '').trim();
 }
 
@@ -76,36 +167,48 @@ async function answerFormQuestion({ formTitle, field, signal, history }) {
     `Form: ${formTitle}\nCurrent field: ${field.label}\nOfficial help for this field: ${field.help}\n` +
     `System signal (computed by code, trust it): ${JSON.stringify(info)}\n` +
     `<user_text>${clean(signal.user_text)}</user_text>\n` +
-    'Task: if status is question, answer the user question using the official help text. ' +
+    "Task: if status is question, answer the user's question in 1 to 3 short sentences. Use the official help text when the question is about the current field. If the question is about another part of getting or filling a Pakistani government form or document (for example CNIC, B-Form, required documents), answer it with general knowledge, even if it is not about the current field. If it is unrelated to forms or government documents, politely say you can only help with forms. " +
     'If status is invalid, say briefly and kindly what was wrong (use reason and digit counts) and how to fix it.';
   const past = (history || []).map((h) => ({ role: h.role, parts: [{ text: h.text }] }));
   const contents = [...past, { role: 'user', parts: [{ text: user }] }];
   const out = await ask(GUARD, contents, true);
+  const logNoReply = () =>
+    console.error('[ai] answerFormQuestion returned no usable reply. raw (first 200 chars): [omitted to protect user text]');
+  let v;
   try {
-    const v = JSON.parse(out);
-    return {
-      reply: String(v.reply || '').trim(),
-      voice: typeof v.voice === 'boolean' ? v.voice : null,
-    };
+    v = JSON.parse(out);
   } catch (e) {
+    logNoReply();
     return { reply: '', voice: null };
   }
+  if (!v || typeof v !== 'object') {
+    logNoReply();
+    return { reply: '', voice: null };
+  }
+  const reply = String(v.reply || '').trim();
+  if (!reply) {
+    logNoReply();
+    return { reply: '', voice: null };
+  }
+  return { reply, voice: typeof v.voice === 'boolean' ? v.voice : null };
 }
 
 async function transcribe(buffer, mimeType) {
-  const r = await pools.stt.run((c) =>
-    c.models.generateContent({
-      model: STT_MODEL,
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType: mimeType || 'audio/ogg', data: buffer.toString('base64') } },
-            { text: 'Transcribe this voice note exactly as spoken, in the original language (Urdu, Roman Urdu, Saraiki or English). Output only the transcript, no commentary. If there is no speech, output nothing.' },
-          ],
-        },
-      ],
-    })
+  const r = await callWithModel('stt', STT_MODEL, (model) =>
+    pools.stt.run((c) =>
+      c.models.generateContent({
+        model,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: mimeType || 'audio/ogg', data: buffer.toString('base64') } },
+              { text: 'Transcribe this voice note exactly as spoken, in the original language (Urdu, Roman Urdu, Saraiki or English). Output only the transcript, no commentary. If there is no speech, output nothing.' },
+            ],
+          },
+        ],
+      })
+    )
   );
   return (r.text || '').trim();
 }
@@ -126,15 +229,17 @@ function pcmToOgg(pcm) {
 }
 
 async function speak(text) {
-  const r = await pools.tts.run((c) =>
-    c.models.generateContent({
-      model: TTS_MODEL,
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: TTS_VOICE } } },
-      },
-    })
+  const r = await callWithModel('tts', TTS_MODEL, (model) =>
+    pools.tts.run((c) =>
+      c.models.generateContent({
+        model,
+        contents: [{ parts: [{ text }] }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: TTS_VOICE } } },
+        },
+      })
+    )
   );
   const part = r.candidates[0].content.parts[0];
   return pcmToOgg(Buffer.from(part.inlineData.data, 'base64'));
