@@ -25,8 +25,26 @@ async function initSchema(pool) {
       created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `);
+  await pool.query("ALTER TABLE applications ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'reverse' CHECK (mode IN ('normal', 'reverse'))");
+  await pool.query('ALTER TABLE applications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()');
+  await pool.query('DELETE FROM applications a USING applications b WHERE a.phone = b.phone AND a.form_type = b.form_type AND a.id < b.id');
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS applications_phone_form_uq ON applications (phone, form_type)');
   await pool.query('CREATE INDEX IF NOT EXISTS applications_phone_idx ON applications (phone)');
-  console.log('✅ sessions + applications tables initialized.');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS focal_persons (
+      form_type  TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      email      TEXT NOT NULL
+    )
+  `);
+  await pool.query(`
+    INSERT INTO focal_persons (form_type, name, email) VALUES
+      ('id_card', 'Ayesha Khan (ID card focal person)', 'focal.idcard@example.com'),
+      ('health_card', 'Bilal Ahmed (health card focal person)', 'focal.health@example.com'),
+      ('license', 'Sara Malik (license focal person)', 'focal.license@example.com')
+    ON CONFLICT (form_type) DO NOTHING
+  `);
+  console.log('✅ sessions, applications, focal_persons tables initialized.');
 }
 
 async function resetSession(pool, phone) {
@@ -70,7 +88,11 @@ async function cleanupSessions(pool) {
 
 async function createApplication(pool, phone, formType, data) {
   const r = await pool.query(
-    'INSERT INTO applications (phone, form_type, data) VALUES ($1, $2, $3) RETURNING id',
+    `INSERT INTO applications (phone, form_type, data, status, mode)
+     VALUES ($1, $2, $3, 'submitted', 'reverse')
+     ON CONFLICT (phone, form_type) DO UPDATE SET
+       data = EXCLUDED.data, status = 'submitted', mode = 'reverse', updated_at = now()
+     RETURNING id`,
     [phone, formType, JSON.stringify(data)]
   );
   return r.rows[0].id;
@@ -84,4 +106,25 @@ async function getLatestApplication(pool, phone) {
   return r.rows[0] || null;
 }
 
-module.exports = { initSchema, getSession, resetSession, saveSession, cleanupSessions, createApplication, getLatestApplication };
+async function getApplication(pool, phone, formType) {
+  const r = await pool.query(
+    'SELECT id, form_type, data, status, mode FROM applications WHERE phone = $1 AND form_type = $2',
+    [phone, formType]
+  );
+  return r.rows[0] || null;
+}
+
+async function listApplicationsForPhone(pool, phone) {
+  const r = await pool.query(
+    'SELECT id, form_type, status, mode FROM applications WHERE phone = $1 ORDER BY id',
+    [phone]
+  );
+  return r.rows;
+}
+
+async function getFocal(pool, formType) {
+  const r = await pool.query('SELECT name, email FROM focal_persons WHERE form_type = $1', [formType]);
+  return r.rows[0] || null;
+}
+
+module.exports = { initSchema, getSession, resetSession, saveSession, cleanupSessions, createApplication, getLatestApplication, getApplication, listApplicationsForPhone, getFocal };
