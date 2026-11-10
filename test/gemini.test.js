@@ -65,7 +65,7 @@ test('all configured keys failing produces bounded attempts and final diagnostic
   const pool = new KeyPool('stt', ['key-one', 'key-two', 'key-three'], (apiKey) => ({ apiKey }), runtime);
   await assert.rejects(
     pool.run(async () => { throw apiError(503, 'UNAVAILABLE'); }, {
-      modelId: 'gemini-3.8-flash',
+      modelId: 'gemini-3.5-flash-lite',
       maxAttempts: 3,
       deadlineMs: 2000,
     }),
@@ -227,7 +227,7 @@ test('separate pools use fixed model IDs and compatible SDK request options', as
 
     assert.deepEqual(calls.map(({ apiKey, params }) => [apiKey, params.model]), [
       ['chat-key', 'gemini-3.5-flash-lite'],
-      ['stt-key', 'gemini-3.8-flash'],
+      ['stt-key', 'gemini-3.5-flash-lite'],
       ['tts-key', 'gemini-3.8-flash-lite-tts'],
     ]);
     for (const { params } of calls) {
