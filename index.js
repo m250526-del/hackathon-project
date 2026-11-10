@@ -12,9 +12,9 @@ const {
 } = require('@whiskeysockets/baileys');
 const { usePostgresAuthState } = require('./postgresAuthState');
 const { initMessageStore, createMessageStore } = require('./messageStore');
-const { handleIncomingMessage } = require('./handler');
+const { handleIncomingMessage, notifyReopened } = require('./handler');
 const ai = require('./ai');
-const { initSchema, cleanupSessions } = require('./db');
+const { initSchema, cleanupSessions, claimReopenedApplications, releaseReopenClaim, resetReopenFlags } = require('./db');
 const { Pool } = require('pg');
 
 // Baileys retry counter — tracks how many times each message has been retried
@@ -68,6 +68,32 @@ async function initDb() {
   }
 }
 initDb();
+
+const reopenFailures = new Map();
+let reopenBusy = false;
+setInterval(async () => {
+  if (reopenBusy || !sock || connectionState !== 'open') return;
+  reopenBusy = true;
+  try {
+    await resetReopenFlags(pgPool);
+    const rows = await claimReopenedApplications(pgPool);
+    for (const row of rows) {
+      try {
+        await notifyReopened(sock, pgPool, row);
+        reopenFailures.delete(row.id);
+      } catch (e) {
+        const tries = (reopenFailures.get(row.id) || 0) + 1;
+        reopenFailures.set(row.id, tries);
+        console.error('[reopen] notify failed:', e.message, 'attempt', tries);
+        if (tries < 5) await releaseReopenClaim(pgPool, row.id);
+      }
+    }
+  } catch (e) {
+    console.error('[reopen] watcher error:', e.message);
+  } finally {
+    reopenBusy = false;
+  }
+}, 5000);
 
 const app = express();
 app.use(express.json());

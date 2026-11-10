@@ -25,7 +25,27 @@ async function initSchema(pool) {
       created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `);
-  await pool.query("ALTER TABLE applications ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'reverse' CHECK (mode IN ('normal', 'reverse'))");
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'app_mode') THEN
+        CREATE TYPE app_mode AS ENUM ('normal', 'reverse');
+      END IF;
+    END $$;
+  `);
+  await pool.query("ALTER TABLE applications ADD COLUMN IF NOT EXISTS mode app_mode NOT NULL DEFAULT 'reverse'");
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF (SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'applications' AND column_name = 'mode') = 'text' THEN
+        ALTER TABLE applications DROP CONSTRAINT IF EXISTS applications_mode_check;
+        ALTER TABLE applications ALTER COLUMN mode DROP DEFAULT;
+        ALTER TABLE applications ALTER COLUMN mode TYPE app_mode USING mode::app_mode;
+        ALTER TABLE applications ALTER COLUMN mode SET DEFAULT 'reverse';
+      END IF;
+    END $$;
+  `);
+  await pool.query('ALTER TABLE applications ADD COLUMN IF NOT EXISTS reopen_notified BOOLEAN NOT NULL DEFAULT false');
   await pool.query('ALTER TABLE applications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()');
   await pool.query('DELETE FROM applications a USING applications b WHERE a.phone = b.phone AND a.form_type = b.form_type AND a.id < b.id');
   await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS applications_phone_form_uq ON applications (phone, form_type)');
@@ -91,7 +111,7 @@ async function createApplication(pool, phone, formType, data) {
     `INSERT INTO applications (phone, form_type, data, status, mode)
      VALUES ($1, $2, $3, 'submitted', 'reverse')
      ON CONFLICT (phone, form_type) DO UPDATE SET
-       data = EXCLUDED.data, status = 'submitted', mode = 'reverse', updated_at = now()
+       data = EXCLUDED.data, status = 'submitted', mode = 'reverse', reopen_notified = false, updated_at = now()
      RETURNING id`,
     [phone, formType, JSON.stringify(data)]
   );
@@ -127,4 +147,21 @@ async function getFocal(pool, formType) {
   return r.rows[0] || null;
 }
 
-module.exports = { initSchema, getSession, resetSession, saveSession, cleanupSessions, createApplication, getLatestApplication, getApplication, listApplicationsForPhone, getFocal };
+async function claimReopenedApplications(pool) {
+  const r = await pool.query(
+    `UPDATE applications SET reopen_notified = true
+     WHERE mode = 'normal' AND reopen_notified = false
+     RETURNING id, phone, form_type, data`
+  );
+  return r.rows;
+}
+
+async function releaseReopenClaim(pool, id) {
+  await pool.query('UPDATE applications SET reopen_notified = false WHERE id = $1', [id]);
+}
+
+async function resetReopenFlags(pool) {
+  await pool.query("UPDATE applications SET reopen_notified = false WHERE mode = 'reverse' AND reopen_notified = true");
+}
+
+module.exports = { initSchema, getSession, resetSession, saveSession, cleanupSessions, createApplication, getLatestApplication, getApplication, listApplicationsForPhone, getFocal, claimReopenedApplications, releaseReopenClaim, resetReopenFlags };

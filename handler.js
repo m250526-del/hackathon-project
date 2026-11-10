@@ -398,6 +398,11 @@ async function handleReverse(ctx, form) {
     return;
   }
 
+  if (app.mode !== 'reverse') {
+    await startForm(ctx, session.form_type);
+    return;
+  }
+
   if (RESET_RE.test(text)) {
     await leaveToMenu(ctx, '');
     return;
@@ -662,4 +667,32 @@ async function handleCollecting(ctx, form) {
   await send(`${reply}\n\n${askText(form, index)}`);
 }
 
-module.exports = { handleIncomingMessage };
+async function notifyReopened(sock, pgPool, app) {
+  const form = FORMS[app.form_type];
+  if (!form) return;
+  const jid = `${app.phone}@s.whatsapp.net`;
+  const session = await getSession(pgPool, app.phone);
+  const busy =
+    session.agent === 'form' &&
+    session.form_type !== app.form_type &&
+    (session.state === 'collecting' || session.state === 'editing' || session.state === 'confirming');
+  let body = '';
+  if (busy) {
+    body = `Aap ka ${form.title} dobara khol diya gaya hai taake aap us mein tabdeeli kar sakein. Jab aap maujooda form mukammal kar lein, to is form ko dobara chun lein aur main aap ke purane jawab dikha dunga.`;
+  } else {
+    await saveSession(pgPool, app.phone, {
+      agent: 'form',
+      form_type: app.form_type,
+      state: 'confirming',
+      field_index: form.fields.length,
+      retry_count: 0,
+      answers: app.data,
+      chat_history: [],
+    });
+    body = `Mode: Normal. Aap ka ${form.title} dobara khol diya gaya hai taake aap us mein tabdeeli kar sakein.\n\nAap ke purane jawab ye hain:\n\n${formView(form, app.data)}\n\nBata dein ke kya badalna hai. Agar sab theek hai to bata dein aur main dobara jama kar dunga, ya chahein to poora form dobara bhar sakte hain.`;
+  }
+  await sock.sendMessage(jid, { text: body });
+  console.log('[reopen] notified', { phoneLast4: String(app.phone).slice(-4), form: app.form_type });
+}
+
+module.exports = { handleIncomingMessage, notifyReopened };
